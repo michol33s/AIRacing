@@ -1,343 +1,325 @@
 
+import argparse
 import math
 import os
 import pickle
-import pygame
-import neat
 import random
 
-from neat.nn import FeedForwardNetwork
-from car import CENTER, TRACK_RX, TRACK_RY, TRACK_WIDTH, Car
-from game import Game
+import pygame
+import neat
 
+from car import (
+    Car, WIDTH, HEIGHT, CENTER,
+    TRACK_RX, TRACK_RY, INNER_RX, INNER_RY,
+    BG, TRACK_COLOR, ROAD_LINE, TURQUOISE,
+)
 
-# Training settings
-POPULATION_SIZE = 40
-MAX_FRAMES_PER_GENERATION = 2400
-MAX_GENERATIONS = 100
-SHOW_SENSORS_BY_DEFAULT = False
-BASE_SEED = 7
+CONFIG_FILE = "config-neat.txt"
+BEST_GENOME_FILE = "f1_pro_best_genome.pkl"
+FASTEST_LAP_FILE = "f1_pro_fastest_lap_genome.pkl"
+FASTEST_RECORD_FILE = "f1_pro_fastest_lap.txt"
+
 FPS = 60
+MAX_FRAMES = 2400
+MAX_GENERATIONS = 100
+POPULATION_SIZE = 40
 
-# Keep the original champion untouched.
-BEST_GENOME_FILE = "best_genome_fast.pkl"
-FASTEST_LAP_FILE = "fastest_lap_genome.pkl"
-FASTEST_LAP_RECORD_FILE = "fastest_lap.txt"
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("F1 Pro NEAT Racer")
+clock = pygame.time.Clock()
 
-GENERATION = 0
-QUIT_REQUESTED = False
+font = pygame.font.SysFont("consolas", 20)
+small_font = pygame.font.SysFont("consolas", 15)
 
-BEST_FITNESS = float("-inf")
-FASTEST_LAP_FRAMES = None
+show_sensors = False
+generation = 0
+fastest_lap_seconds = float("inf")
+best_fitness = float("-inf")
 
 
-def make_car(genome, config, index, total_cars):
-    """Create a car at a different position on the track."""
-    base_theta = math.radians(155)
-    theta = base_theta + (2 * math.pi * index / total_cars)
+def draw_track():
+    screen.fill(BG)
 
-    rx = TRACK_RX - TRACK_WIDTH / 2
-    ry = TRACK_RY - TRACK_WIDTH / 2
+    pygame.draw.ellipse(
+        screen, TRACK_COLOR,
+        (CENTER[0] - TRACK_RX, CENTER[1] - TRACK_RY,
+         TRACK_RX * 2, TRACK_RY * 2)
+    )
+    pygame.draw.ellipse(
+        screen, BG,
+        (CENTER[0] - INNER_RX, CENTER[1] - INNER_RY,
+         INNER_RX * 2, INNER_RY * 2)
+    )
+    pygame.draw.ellipse(
+        screen, ROAD_LINE,
+        (CENTER[0] - TRACK_RX, CENTER[1] - TRACK_RY,
+         TRACK_RX * 2, TRACK_RY * 2), 2
+    )
+    pygame.draw.ellipse(
+        screen, ROAD_LINE,
+        (CENTER[0] - INNER_RX, CENTER[1] - INNER_RY,
+         INNER_RX * 2, INNER_RY * 2), 2
+    )
 
-    x = CENTER[0] + rx * math.cos(theta)
-    y = CENTER[1] + ry * math.sin(theta)
-
-    tangent_x = -rx * math.sin(theta)
-    tangent_y = ry * math.cos(theta)
-    angle = math.atan2(tangent_y, tangent_x)
-
-    palette = [
-        (40, 170, 255),
-        (255, 105, 90),
-        (255, 210, 70),
-        (120, 230, 140),
-        (205, 130, 255),
-        (255, 145, 205),
-    ]
-
-    brain = FeedForwardNetwork.create(genome, config)
-
-    return Car(
-        x,
-        y,
-        angle,
-        color=palette[index % len(palette)],
-        brain=brain,
+    sx = CENTER[0]
+    sy = CENTER[1] - (TRACK_RY + INNER_RY) // 2
+    pygame.draw.line(
+        screen, (255, 255, 255),
+        (sx, sy - 10), (sx, sy + 10), 4
     )
 
 
-def save_genome(genome, filename):
-    """Save safely using a temporary file."""
-    path = os.path.abspath(filename)
-    temp_path = path + ".tmp"
-
-    try:
-        with open(temp_path, "wb") as file:
-            pickle.dump(genome, file)
-
-        os.replace(temp_path, path)
-
-    finally:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
+def draw_text(text, x, y, color=(235, 240, 245), font_obj=font):
+    screen.blit(font_obj.render(text, True, color), (x, y))
 
 
-def save_if_new_best(genome_id, genome):
-    """Save the highest-fitness genome from this training run."""
-    global BEST_FITNESS
-
-    if genome.fitness is None or genome.fitness <= BEST_FITNESS:
-        return
-
-    save_genome(genome, BEST_GENOME_FILE)
-    BEST_FITNESS = genome.fitness
-
-    print("\n*** NEW TRAINING CHAMPION SAVED ***")
-    print(f"Generation: {GENERATION}")
-    print(f"Genome ID: {genome_id}")
-    print(f"Fitness: {BEST_FITNESS:.2f}")
-    print(f"File: {os.path.abspath(BEST_GENOME_FILE)}\n")
+def make_starting_grid(count):
+    """Evenly spaced positions with a random offset and shuffled assignment."""
+    offset = random.uniform(0, 2 * math.pi)
+    angles = [
+        (offset + 2 * math.pi * i / count) % (2 * math.pi)
+        for i in range(count)
+    ]
+    random.shuffle(angles)
+    return angles
 
 
-def save_if_fastest_lap(genome_id, genome, lap_frames):
-    """Save the genome that achieved the fastest completed lap."""
-    global FASTEST_LAP_FRAMES
+def load_config():
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        CONFIG_FILE
+    )
 
-    if lap_frames is None or lap_frames <= 0:
-        return
-
-    if (
-            FASTEST_LAP_FRAMES is not None
-            and lap_frames >= FASTEST_LAP_FRAMES
-    ):
-        return
-
-    FASTEST_LAP_FRAMES = lap_frames
-    lap_seconds = lap_frames / FPS
-
-    save_genome(genome, FASTEST_LAP_FILE)
-
-    with open(FASTEST_LAP_RECORD_FILE, "w", encoding="utf-8") as file:
-        file.write(f"{lap_seconds:.4f}\n")
-        file.write(f"{lap_frames}\n")
-        file.write(f"Generation: {GENERATION}\n")
-        file.write(f"Genome ID: {genome_id}\n")
-
-    print("\n*** NEW FASTEST LAP! ***")
-    print(f"Generation: {GENERATION}")
-    print(f"Genome ID: {genome_id}")
-    print(f"Lap time: {lap_seconds:.3f} seconds")
-    print(f"File: {os.path.abspath(FASTEST_LAP_FILE)}\n")
-
-
-def evaluate_genomes(genomes, config):
-    """Evaluate every genome simultaneously."""
-    global QUIT_REQUESTED
-
-    game = Game()
-    game.show_sensors = SHOW_SENSORS_BY_DEFAULT
-
-    cars = []
-    genome_for_car = {}
-
-    total_cars = len(genomes)
-
-    for index, (genome_id, genome) in enumerate(genomes):
-        genome.fitness = 0.0
-
-        car = make_car(
-            genome,
-            config,
-            index,
-            total_cars,
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"Missing {CONFIG_FILE}; place it beside main.py."
         )
 
-        cars.append(car)
-        genome_for_car[id(car)] = (genome_id, genome)
-
-    # Track each car's previous personal best lap.
-    previous_best_laps = {
-        id(car): None for car in cars
-    }
-
-    frame = 0
-    running = True
-
-    try:
-        while (
-                running
-                and frame < MAX_FRAMES_PER_GENERATION
-                and any(car.alive for car in cars)
-        ):
-            running = game.handle_events()
-
-            if not running:
-                QUIT_REQUESTED = True
-                break
-
-            for car in cars:
-                if not car.alive:
-                    continue
-
-                car.update()
-
-                genome_id, genome = genome_for_car[id(car)]
-                genome.fitness = car.fitness
-
-                # Check whether this car just set a personal lap record.
-                current_best = car.best_lap_frames
-                previous_best = previous_best_laps[id(car)]
-
-                if (
-                        current_best is not None
-                        and (
-                        previous_best is None
-                        or current_best < previous_best
-                )
-                ):
-                    previous_best_laps[id(car)] = current_best
-
-                    save_if_fastest_lap(
-                        genome_id,
-                        genome,
-                        current_best,
-                    )
-
-            best_generation_fitness = max(
-                (car.fitness for car in cars),
-                default=0.0,
-            )
-
-            alive_count = sum(car.alive for car in cars)
-
-            game.draw(
-                cars,
-                GENERATION,
-                alive_count,
-                best_generation_fitness,
-                frame,
-            )
-
-            game.tick(FPS)
-            frame += 1
-
-        # Finalize all genomes, including those whose cars crashed.
-        for car in cars:
-            genome_id, genome = genome_for_car[id(car)]
-            genome.fitness = max(0.01, car.fitness)
-
-            save_if_new_best(genome_id, genome)
-
-        print(
-            f"\nGeneration {GENERATION} evaluated | "
-            f"Frames: {frame}/{MAX_FRAMES_PER_GENERATION} | "
-            f"Cars alive: {sum(car.alive for car in cars)} | "
-            f"Best fitness this run: {BEST_FITNESS:.2f}"
-        )
-
-        if FASTEST_LAP_FRAMES is not None:
-            print(
-                "Fastest lap this run: "
-                f"{FASTEST_LAP_FRAMES / FPS:.3f} seconds"
-            )
-
-    finally:
-        game.close()
-
-    if QUIT_REQUESTED:
-        raise KeyboardInterrupt
-
-
-def run():
-    global GENERATION
-
-    random.seed(BASE_SEED)
-
-    # Load NEAT configuration.
     config = neat.Config(
         neat.DefaultGenome,
         neat.DefaultReproduction,
         neat.DefaultSpeciesSet,
         neat.DefaultStagnation,
-        "config-neat.txt",
+        path,
+    )
+    config.pop_size = POPULATION_SIZE
+    return config
+
+
+def save_if_fastest_lap(genome, car):
+    global fastest_lap_seconds
+
+    if car.best_lap_frames is None:
+        return
+
+    lap_seconds = car.best_lap_frames / FPS
+
+    if lap_seconds < fastest_lap_seconds:
+        fastest_lap_seconds = lap_seconds
+
+        with open(FASTEST_LAP_FILE, "wb") as file:
+            pickle.dump(genome, file)
+
+        with open(FASTEST_RECORD_FILE, "w", encoding="utf-8") as file:
+            file.write("F1 Pro fastest lap\n")
+            file.write(f"Lap time: {lap_seconds:.4f} seconds\n")
+            file.write(f"Frames: {car.best_lap_frames}\n")
+            file.write(f"Generation: {generation}\n")
+
+        print(f"New fastest lap: {lap_seconds:.4f}s")
+
+
+def eval_genomes(genomes, config):
+    global generation, best_fitness, show_sensors
+    generation += 1
+
+    networks = []
+    cars = []
+    genome_list = []
+
+    grid = make_starting_grid(len(genomes))
+
+    for index, (genome_id, genome) in enumerate(genomes):
+        genome.fitness = 0.0
+        networks.append(
+            neat.nn.FeedForwardNetwork.create(genome, config)
+        )
+        cars.append(Car(theta=grid[index]))
+        genome_list.append(genome)
+
+    for frame in range(MAX_FRAMES):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                raise SystemExit
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    raise SystemExit
+                if event.key == pygame.K_s:
+                    show_sensors = not show_sensors
+
+        active = 0
+
+        for i, car in enumerate(cars):
+            if not car.alive:
+                continue
+
+            inputs = car.sensors()
+            inputs += [
+                car.speed / car.max_speed,
+                math.cos(car.angle - car.track_tangent()),
+                ]
+
+            outputs = networks[i].activate(inputs)
+            car.update(outputs)
+            genome_list[i].fitness = car.fitness
+
+            save_if_fastest_lap(genome_list[i], car)
+
+            if car.alive:
+                active += 1
+
+        draw_track()
+
+        for car in cars:
+            if car.alive:
+                car.draw(screen, show_sensors)
+
+        best_this_gen = max(
+            (car.fitness for car in cars), default=0.0
+        )
+
+        draw_text("F1 PRO | NEAT TRAINING", 20, 15, TURQUOISE)
+        draw_text(f"Generation: {generation}", 20, 45)
+        draw_text(f"Frame: {frame}/{MAX_FRAMES}", 20, 75)
+        draw_text(f"Cars running: {active}/{len(cars)}", 20, 105)
+        draw_text(f"Best fitness: {best_this_gen:.1f}", 20, 135)
+
+        record = (
+            f"Fastest lap: {fastest_lap_seconds:.2f}s"
+            if math.isfinite(fastest_lap_seconds)
+            else "Fastest lap: --"
+        )
+        draw_text(record, 20, 165, TURQUOISE)
+        draw_text(
+            "S: sensors | ESC: quit",
+            20, HEIGHT - 30, (190, 200, 215), small_font
+        )
+
+        pygame.display.flip()
+        clock.tick(FPS)
+
+        if active == 0:
+            break
+
+    for genome in genome_list:
+        if genome.fitness is not None and genome.fitness > best_fitness:
+            best_fitness = genome.fitness
+            with open(BEST_GENOME_FILE, "wb") as file:
+                pickle.dump(genome, file)
+
+
+def play_genome(which):
+    global show_sensors
+
+    filename = (
+        FASTEST_LAP_FILE if which == "fastest"
+        else BEST_GENOME_FILE
     )
 
-    config.pop_size = POPULATION_SIZE
-
-    # Start a new population. Do not compare new fitness values with
-    # the old champion's score because the reward has changed.
-    population = neat.Population(config)
-
-    population.add_reporter(neat.StdOutReporter(True))
-    population.add_reporter(neat.StatisticsReporter())
-
-    def evaluate_with_generation(genomes, neat_config):
-        global GENERATION
-
-        GENERATION += 1
-
-        print("\n" + "=" * 55)
-        print(f"STARTING GENERATION {GENERATION}")
-        print(f"Cars in this generation: {len(genomes)}")
-        print("=" * 55)
-
-        evaluate_genomes(genomes, neat_config)
-
-        print(
-            f"Generation {GENERATION} complete. "
-            f"Best fitness this run: {BEST_FITNESS:.2f}"
+    if not os.path.isfile(filename):
+        raise FileNotFoundError(
+            f"{filename} not found. Train the racer first."
         )
+
+    config = load_config()
+    with open(filename, "rb") as file:
+        genome = pickle.load(file)
+
+    network = neat.nn.FeedForwardNetwork.create(genome, config)
+    car = Car()
+    frame = 0
+    pygame.display.set_caption(f"F1 Pro Playback: {which}")
+
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+                elif event.key == pygame.K_s:
+                    show_sensors = not show_sensors
+                elif event.key == pygame.K_r:
+                    car = Car()
+                    frame = 0
+
+        if car.alive:
+            inputs = car.sensors()
+            inputs += [
+                car.speed / car.max_speed,
+                math.cos(car.angle - car.track_tangent()),
+                ]
+            car.update(network.activate(inputs))
+
+        draw_track()
+        car.draw(screen, show_sensors)
+
+        draw_text(f"PLAYBACK: {which.upper()}", 20, 15, TURQUOISE)
+        draw_text(f"Speed: {car.speed:.2f}", 20, 45)
+        draw_text(f"Fitness: {car.fitness:.1f}", 20, 75)
+        draw_text(f"Laps: {car.completed_laps}", 20, 105)
+        draw_text(f"Frame: {frame}", 20, 135)
+
+        draw_text(
+            "S: sensors | R: restart | ESC: quit",
+            20, HEIGHT - 30, (190, 200, 215), small_font
+        )
+
+        if not car.alive:
+            draw_text("OFF TRACK - press R to restart", 20, 175,
+                      (255, 100, 100))
+
+        pygame.display.flip()
+        clock.tick(FPS)
+        frame += 1
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--play", choices=("best", "fastest"),
+        help="Watch a saved genome instead of training."
+    )
+    args = parser.parse_args()
 
     try:
-        winner = population.run(
-            evaluate_with_generation,
-            MAX_GENERATIONS,
-        )
+        if args.play:
+            play_genome(args.play)
+            return
 
-        print("\nTraining complete.")
-        print("Best genome returned by NEAT:")
-        print(winner)
+        config = load_config()
+        population = neat.Population(config)
+        population.add_reporter(neat.StdOutReporter(True))
+        population.add_reporter(neat.StatisticsReporter())
 
-        save_if_new_best("final winner", winner)
+        winner = population.run(eval_genomes, MAX_GENERATIONS)
 
-        print(f"\nBest fitness this run: {BEST_FITNESS:.2f}")
-        print(
-            "Fitness champion: "
-            f"{os.path.abspath(BEST_GENOME_FILE)}"
-        )
+        with open(BEST_GENOME_FILE, "wb") as file:
+            pickle.dump(winner, file)
 
-        if FASTEST_LAP_FRAMES is not None:
-            print(
-                f"Fastest lap: {FASTEST_LAP_FRAMES / FPS:.3f} seconds"
-            )
-            print(
-                "Fastest-lap genome: "
-                f"{os.path.abspath(FASTEST_LAP_FILE)}"
-            )
+        print("Training complete.")
+        print(f"Best genome saved to {BEST_GENOME_FILE}")
+
+        if os.path.isfile(FASTEST_LAP_FILE):
+            print(f"Fastest lap genome saved to {FASTEST_LAP_FILE}")
         else:
-            print(
-                "No complete lap was recorded during this training run."
-            )
-
-    except KeyboardInterrupt:
-        print("\nTraining stopped.")
-
-        if BEST_FITNESS > float("-inf"):
-            print(f"Best fitness recorded: {BEST_FITNESS:.2f}")
-            print(f"Saved genome: {BEST_GENOME_FILE}")
-
-        if FASTEST_LAP_FRAMES is not None:
-            print(
-                "Fastest lap recorded: "
-                f"{FASTEST_LAP_FRAMES / FPS:.3f} seconds"
-            )
+            print("No complete lap recorded yet.")
 
     finally:
         pygame.quit()
 
 
 if __name__ == "__main__":
-    run()
+    main()
