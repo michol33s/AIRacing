@@ -1,0 +1,4 @@
+4.0167
+241
+Generation: 11
+Genome ID: 385
