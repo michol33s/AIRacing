@@ -2,511 +2,257 @@
 import math
 import os
 import pickle
-
 import pygame
 import neat
 
 from car import (
-    Car,
-    WIDTH,
-    HEIGHT,
-    CENTER,
-    TRACK_RX,
-    TRACK_RY,
-    TRACK_WIDTH,
-    INNER_RX,
-    INNER_RY,
-    BG,
-    TRACK_COLOR,
-    ROAD_LINE,
-    TURQUOISE,
+    Car, WIDTH, HEIGHT, TRACK_WIDTH, TRACK_CENTERLINE,
+    GRASS, TRACK_COLOR, ROAD_LINE, CENTER_LINE
 )
 
-# --------------------------------------------------
-# SETTINGS
-# --------------------------------------------------
-
-CONFIG_FILE = "config-neat.txt"
+FAST_FILE = "f1_pro_fastest_lap_genome.pkl"
 BEST_FILE = "f1_pro_best_genome.pkl"
-FASTEST_FILE = "f1_pro_fastest_lap_genome.pkl"
+CONFIG_FILE = "config-neat.txt"
 
 FPS = 60
-
-COLORS = [
-    (255, 205, 50),   # Gold
-    (60, 190, 255),   # Blue
-    (255, 75, 100),   # Red
-]
+TARGET_LAPS = 200
+COLORS = [(0, 255, 210), (255, 90, 90), (255, 210, 60)]
+WHITE = (240, 240, 240)
+YELLOW = (255, 220, 70)
+GREEN = (100, 255, 130)
 
 pygame.init()
-
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("F1 Three Car Championship")
+pygame.display.set_caption("F1 NEAT - 200 Lap Race")
 clock = pygame.time.Clock()
+font = pygame.font.SysFont("consolas", 17)
+small = pygame.font.SysFont("consolas", 14)
 
-font = pygame.font.SysFont("consolas", 20, bold=True)
-small_font = pygame.font.SysFont("consolas", 15)
-
-SHOW_SENSORS = False
-
-
-# --------------------------------------------------
-# LOAD SAVED GENOMES
-# --------------------------------------------------
-
-def load_genome(filename):
-    if not os.path.isfile(filename):
-        raise FileNotFoundError(
-            f"Missing {filename}. Put it in the same folder as race_three.py."
-        )
-
-    with open(filename, "rb") as file:
-        return pickle.load(file)
+N = len(TRACK_CENTERLINE)
+SEGMENTS = [
+    math.hypot(
+        TRACK_CENTERLINE[(i + 1) % N][0] - TRACK_CENTERLINE[i][0],
+        TRACK_CENTERLINE[(i + 1) % N][1] - TRACK_CENTERLINE[i][1]
+    ) for i in range(N)
+]
+CUM = [0.0]
+for d in SEGMENTS:
+    CUM.append(CUM[-1] + d)
+TRACK_LENGTH = CUM[-1]
 
 
-def format_time(seconds):
-    if seconds is None:
+def label(text, x, y, color=WHITE, f=font):
+    screen.blit(f.render(str(text), True, color), (x, y))
+
+
+def lap_time(frames):
+    if frames is None:
         return "--:--.---"
-
-    minutes = int(seconds // 60)
-    remaining = seconds % 60
-
-    return f"{minutes:02}:{remaining:06.3f}"
+    seconds = frames / FPS
+    return f"{int(seconds // 60):02d}:{seconds % 60:06.3f}"
 
 
-# --------------------------------------------------
-# TRACK DRAWING
-# --------------------------------------------------
+def track_index(car):
+    return min(range(N), key=lambda i:
+    (TRACK_CENTERLINE[i][0] - car.x) ** 2 +
+    (TRACK_CENTERLINE[i][1] - car.y) ** 2)
+
+
+def distance(car):
+    return car.completed_laps * TRACK_LENGTH + CUM[track_index(car)]
+
 
 def draw_track():
-    screen.fill(BG)
-
-    pygame.draw.ellipse(
-        screen,
-        TRACK_COLOR,
-        (
-            CENTER[0] - TRACK_RX,
-            CENTER[1] - TRACK_RY,
-            TRACK_RX * 2,
-            TRACK_RY * 2,
-        ),
-    )
-
-    pygame.draw.ellipse(
-        screen,
-        BG,
-        (
-            CENTER[0] - INNER_RX,
-            CENTER[1] - INNER_RY,
-            INNER_RX * 2,
-            INNER_RY * 2,
-        ),
-    )
-
-    pygame.draw.ellipse(
-        screen,
-        ROAD_LINE,
-        (
-            CENTER[0] - TRACK_RX,
-            CENTER[1] - TRACK_RY,
-            TRACK_RX * 2,
-            TRACK_RY * 2,
-        ),
-        2,
-    )
-
-    pygame.draw.ellipse(
-        screen,
-        ROAD_LINE,
-        (
-            CENTER[0] - INNER_RX,
-            CENTER[1] - INNER_RY,
-            INNER_RX * 2,
-            INNER_RY * 2,
-        ),
-        2,
-    )
-
-    # Start/finish line at the top of the circuit.
-    start_y = CENTER[1] - (TRACK_RY + INNER_RY) / 2
-
-    pygame.draw.line(
-        screen,
-        (255, 255, 255),
-        (CENTER[0] - 12, int(start_y)),
-        (CENTER[0] + 12, int(start_y)),
-        4,
-    )
-
-
-# --------------------------------------------------
-# STARTING GRID
-# --------------------------------------------------
-
-def create_racers(config):
-    genomes = [
-        load_genome(FASTEST_FILE),
-        load_genome(BEST_FILE),
-        load_genome(FASTEST_FILE),
-    ]
-
-    racers = []
-
-    # Staggered grid on the upper-left portion of the oval.
-    # The coordinates are derived from the ellipse so the cars
-    # begin inside the road instead of outside its boundaries.
-    grid_angles = [
-        math.radians(225),
-        math.radians(225),
-        math.radians(225),
-    ]
-
-    # Cars start at the same circuit section but in separate
-    # lanes, with longitudinal spacing between rows.
-    road_rx = (TRACK_RX + INNER_RX) / 2
-    road_ry = (TRACK_RY + INNER_RY) / 2
-
-    # Approximate grid locations on the upper-left curve.
-    grid_positions = [
-        (CENTER[0] - 210, CENTER[1] - 145),
-        (CENTER[0] - 250, CENTER[1] - 120),
-        (CENTER[0] - 290, CENTER[1] - 95),
-    ]
-
-    for i, genome in enumerate(genomes):
-        network = neat.nn.FeedForwardNetwork.create(genome, config)
-
-        theta = grid_angles[i]
-        car = Car(theta=theta)
-
-        car.x, car.y = grid_positions[i]
-
-        # Tangent of the ellipse at the car's location.
-        ellipse_theta = math.atan2(
-            (car.y - CENTER[1]) / TRACK_RY,
-            (car.x - CENTER[0]) / TRACK_RX,
-            )
-
-        tangent_x = -TRACK_RX * math.sin(ellipse_theta)
-        tangent_y = TRACK_RY * math.cos(ellipse_theta)
-
-        car.angle = math.atan2(tangent_y, tangent_x)
-
-        car.speed = 0.0
-        car.alive = True
-        car.fitness = 0.0
-        car.completed_laps = 0
-        car.lap_frames = 0
-        car.best_lap_frames = None
-
-        car.previous_x = car.x
-        car.previous_y = car.y
-        car.previous_progress = car.track_progress()
-        car.progress_since_lap = 0.0
-        car.stuck_frames = 0
-        car.color = COLORS[i]
-
-        racers.append({
-            "name": f"CAR {i + 1}",
-            "car": car,
-            "network": network,
-            "best_lap": None,
-            "current_lap_start": pygame.time.get_ticks(),
-            "lap_times": [],
-            "previous_laps": 0,
-            "finished": False,
-        })
-
-    return racers
-
-
-# --------------------------------------------------
-# UPDATE RACER
-# --------------------------------------------------
-
-def update_racer(racer):
-    car = racer["car"]
-
-    if not car.alive:
-        return
-
-    inputs = car.sensors()
-    inputs += [
-        car.speed / car.max_speed,
-        math.cos(car.angle - car.track_tangent()),
-        ]
-
-    outputs = racer["network"].activate(inputs)
-
-    previous_laps = car.completed_laps
-    car.update(outputs)
-
-    if car.completed_laps > previous_laps:
-        now = pygame.time.get_ticks()
-
-        lap_seconds = (
-                              now - racer["current_lap_start"]
-                      ) / 1000.0
-
-        if lap_seconds > 0:
-            racer["lap_times"].append(lap_seconds)
-
-            if (
-                    racer["best_lap"] is None
-                    or lap_seconds < racer["best_lap"]
-            ):
-                racer["best_lap"] = lap_seconds
-
-        racer["current_lap_start"] = now
-
-
-# --------------------------------------------------
-# LIVE RACE ORDER
-# --------------------------------------------------
-
-def race_progress(racer):
-    car = racer["car"]
-
-    return (
-            car.completed_laps
-            + car.progress_since_lap / (2 * math.pi)
-    )
-
-
-
-def draw_leaderboard(racers, race_seconds):
-    ordered = sorted(
-        racers,
-        key=lambda racer: (
-            race_progress(racer),
-            racer["car"].fitness,
-        ),
-        reverse=True,
-    )
-
-    panel_bg = (12, 17, 27, 220)
-    white = (240, 243, 248)
-    grey = (175, 185, 200)
-    green = (100, 240, 150)
-
-    margin = 12
-    panel_width = 270
-    panel_height = 150
-
-    def draw_panel(x, y, width, height, title):
-        panel = pygame.Surface((width, height), pygame.SRCALPHA)
-        panel.fill(panel_bg)
-        screen.blit(panel, (x, y))
-
-        screen.blit(
-            font.render(title, True, TURQUOISE),
-            (x + 12, y + 10),
-        )
-
-    # --------------------------------------------------
-    # TOP LEFT: LIVE POSITIONS AND LAPS
-    # --------------------------------------------------
-    x = margin
-    y = margin
-    draw_panel(x, y, panel_width, panel_height, "LIVE POSITIONS")
-
-    row_y = y + 43
-
-    for position, racer in enumerate(ordered):
-        car = racer["car"]
-        index = int(racer["name"][-1]) - 1
-
-        status = "RUN" if car.alive else "OUT"
-
-        line = (
-            f"P{position + 1}  {racer['name']}  "
-            f"L{car.completed_laps}  {status}"
-        )
-
-        screen.blit(
-            small_font.render(line, True, COLORS[index]),
-            (x + 12, row_y),
-        )
-
-        row_y += 29
-
-    # --------------------------------------------------
-    # TOP RIGHT: CURRENT LAP TIMES
-    # --------------------------------------------------
-    x = WIDTH - panel_width - margin
-    y = margin
-    draw_panel(x, y, panel_width, panel_height, "CURRENT LAP")
-
-    row_y = y + 43
-
-    now = pygame.time.get_ticks()
-
-    for racer in racers:
-        index = int(racer["name"][-1]) - 1
-
-        if racer["car"].completed_laps == 0:
-            elapsed = (now - race_start_time) / 1000.0
-        else:
-            elapsed = (now - racer["current_lap_start"]) / 1000.0
-
-        line = f"{racer['name']}: {format_time(elapsed)}"
-
-        screen.blit(
-            small_font.render(line, True, COLORS[index]),
-            (x + 12, row_y),
-        )
-
-        row_y += 29
-
-    # --------------------------------------------------
-    # BOTTOM LEFT: PERSONAL BEST LAPS
-    # --------------------------------------------------
-    x = margin
-    y = HEIGHT - panel_height - margin
-    draw_panel(x, y, panel_width, panel_height, "PERSONAL BEST")
-
-    row_y = y + 43
-
-    for racer in racers:
-        index = int(racer["name"][-1]) - 1
-        best = format_time(racer["best_lap"])
-
-        line = f"{racer['name']}: {best}"
-
-        screen.blit(
-            small_font.render(line, True, COLORS[index]),
-            (x + 12, row_y),
-        )
-
-        row_y += 29
-
-    # --------------------------------------------------
-    # BOTTOM RIGHT: RACE STATUS AND CONTROLS
-    # --------------------------------------------------
-    x = WIDTH - panel_width - margin
-    y = HEIGHT - panel_height - margin
-    draw_panel(x, y, panel_width, panel_height, "RACE STATUS")
-
-    screen.blit(
-        small_font.render(
-            f"Race time: {format_time(race_seconds)}",
-            True,
-            white,
-        ),
-        (x + 12, y + 43),
-    )
-
-    active = sum(1 for racer in racers if racer["car"].alive)
-
-    screen.blit(
-        small_font.render(
-            f"Cars running: {active}/3",
-            True,
-            green if active else grey,
-        ),
-        (x + 12, y + 68),
-    )
-
-    screen.blit(
-        small_font.render("SPACE: Pause  R: Restart", True, white),
-        (x + 12, y + 96),
-    )
-
-    screen.blit(
-        small_font.render("S: Sensors  ESC: Quit", True, white),
-        (x + 12, y + 119),
-    )
-
-
-
-# --------------------------------------------------
-# MAIN LOOP
-# --------------------------------------------------
-
-def main():
-    global SHOW_SENSORS
+    screen.fill(GRASS)
+    pts = [(int(x), int(y)) for x, y in TRACK_CENTERLINE]
+    pygame.draw.lines(screen, TRACK_COLOR, True, pts, TRACK_WIDTH)
+    for p in pts:
+        pygame.draw.circle(screen, TRACK_COLOR, p, TRACK_WIDTH // 2)
+    pygame.draw.lines(screen, ROAD_LINE, True, pts, 2)
+
+    # Dashed centerline
+    for i in range(N):
+        x1, y1 = TRACK_CENTERLINE[i]
+        x2, y2 = TRACK_CENTERLINE[(i + 1) % N]
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length == 0:
+            continue
+        step = 24
+        for start in range(0, int(length), step):
+            end = min(start + 12, length)
+            a, b = start / length, end / length
+            pygame.draw.line(screen, CENTER_LINE,
+                             (int(x1 + (x2-x1)*a), int(y1 + (y2-y1)*a)),
+                             (int(x1 + (x2-x1)*b), int(y1 + (y2-y1)*b)), 2)
+
+
+def draw_car(car, color, sensors=False):
+    x, y, a = car.x, car.y, car.angle
+    dark = tuple(max(0, c - 65) for c in color)
+
+    def point(px, py):
+        return (int(x + px * math.cos(a) - py * math.sin(a)),
+                int(y + px * math.sin(a) + py * math.cos(a)))
+
+    def poly(points, c):
+        pygame.draw.polygon(screen, c, [point(px, py) for px, py in points])
+
+    if sensors:
+        for offset in (-math.pi/2, -math.pi/4, 0, math.pi/4, math.pi/2):
+            end = (int(x + 150 * math.cos(a + offset)),
+                   int(y + 150 * math.sin(a + offset)))
+            pygame.draw.line(screen, GREEN, (int(x), int(y)), end, 1)
+
+    # Wings and tyres
+    poly([(-31,-12),(-25,-15),(-25,15),(-31,12)], dark)
+    poly([(25,-15),(32,-13),(32,13),(25,15)], dark)
+    for tx, ty in [(-19,-15),(-19,15),(18,-15),(18,15)]:
+        poly([(tx-5,ty-3),(tx+5,ty-3),(tx+5,ty+3),(tx-5,ty+3)], (20,20,23))
+
+    # Sidepods and body
+    poly([(-13,-12),(12,-12),(19,-7),(15,-4),(-13,-5)], dark)
+    poly([(-13,12),(12,12),(19,7),(15,4),(-13,5)], dark)
+    poly([(-25,-5),(-15,-8),(10,-7),(26,-3),(30,0),
+          (26,3),(10,7),(-15,8),(-25,5)], color)
+
+    # Cockpit, helmet and halo
+    poly([(-8,-4),(9,-4),(15,-2),(15,2),(9,4),(-8,4),(-12,0)],
+         (28,31,37))
+    pygame.draw.circle(screen, WHITE, point(2, 0), 3)
+    pygame.draw.lines(screen, (185,185,190), False,
+                      [point(-7,-5),point(-2,-2),point(7,-2)], 2)
+    pygame.draw.lines(screen, (185,185,190), False,
+                      [point(-7,5),point(-2,2),point(7,2)], 2)
+
+
+def make_car(i):
+    start = i * 8
+    car = Car(2 * math.pi * start / N)
+    car.start_index = start
+    car.race_frames = 0
+    car.race_color = COLORS[i]
+    car.race_finished = False
+    return car
+
+
+def respawn(car, i):
+    fresh = Car(2 * math.pi * car.start_index / N)
+    fresh.completed_laps = car.completed_laps
+    fresh.best_lap_frames = car.best_lap_frames
+    fresh.race_frames = car.race_frames
+    fresh.start_index = car.start_index
+    fresh.race_color = COLORS[i]
+    return fresh
+
+
+def load_brain():
+    folder = os.path.dirname(os.path.abspath(__file__))
+    path = next((os.path.join(folder, f) for f in
+                 (FAST_FILE, BEST_FILE)
+                 if os.path.isfile(os.path.join(folder, f))), None)
+    if path is None:
+        raise FileNotFoundError("Train first: no saved genome found.")
+
+    with open(path, "rb") as f:
+        genome = pickle.load(f)
 
     config = neat.Config(
-        neat.DefaultGenome,
-        neat.DefaultReproduction,
-        neat.DefaultSpeciesSet,
-        neat.DefaultStagnation,
-        CONFIG_FILE,
+        neat.DefaultGenome, neat.DefaultReproduction,
+        neat.DefaultSpeciesSet, neat.DefaultStagnation,
+        os.path.join(folder, CONFIG_FILE)
     )
+    if config.genome_config.num_inputs != 7 or config.genome_config.num_outputs != 2:
+        raise ValueError("NEAT config must have 7 inputs and 2 outputs.")
 
-    racers = create_racers(config)
+    print("Loaded:", path)
+    return neat.nn.FeedForwardNetwork.create(genome, config)
 
+
+def race():
+    net = load_brain()
+    cars = [make_car(i) for i in range(3)]
+    show_sensors = finished = False
+    overall_best = None
+    last_gap_update = pygame.time.get_ticks()
+    gaps = [0.0] * 3
     running = True
-    paused = False
-    race_start = pygame.time.get_ticks()
-    global race_start_time
-    race_start_time = race_start
 
+    while running:
+        clock.tick(FPS)
+        now = pygame.time.get_ticks()
 
-    try:
-        while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
                     running = False
+                elif event.key == pygame.K_s:
+                    show_sensors = not show_sensors
 
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        running = False
+        if not running:
+            break
 
-                    elif event.key == pygame.K_s:
-                        SHOW_SENSORS = not SHOW_SENSORS
+        if not finished:
+            for i, car in enumerate(cars):
+                car.race_frames += 1
+                if car.alive:
+                    inputs = list(car.sensors()) + [
+                        car.speed / car.max_speed,
+                        math.cos(car.angle - car.track_tangent())
+                    ]
+                    car.update(net.activate(inputs))
 
-                    elif event.key == pygame.K_SPACE:
-                        paused = not paused
+                if not car.alive:
+                    cars[i] = respawn(car, i)
+                    continue
 
-                    elif event.key == pygame.K_r:
-                        racers = create_racers(config)
-                        race_start = pygame.time.get_ticks()
-                        paused = False
+                if car.best_lap_frames is not None:
+                    if overall_best is None or car.best_lap_frames < overall_best:
+                        overall_best = car.best_lap_frames
 
-            if not paused:
-                for racer in racers:
-                    update_racer(racer)
+            finished = all(c.completed_laps >= TARGET_LAPS for c in cars)
 
-            race_seconds = (
-                                   pygame.time.get_ticks() - race_start
-                           ) / 1000.0
+        # Recalculate displayed gaps every second
+        if now - last_gap_update >= 1000:
+            leader_dist = max(distance(c) for c in cars)
+            gaps = [leader_dist - distance(c) for c in cars]
+            last_gap_update = now
 
-            draw_track()
+        ranked = sorted(range(3), key=lambda i: distance(cars[i]), reverse=True)
 
-            for racer in racers:
-                racer["car"].draw(screen, SHOW_SENSORS)
+        draw_track()
+        for i, car in enumerate(cars):
+            draw_car(car, COLORS[i], show_sensors)
 
-            draw_leaderboard(racers, race_seconds)
+        # Race leaderboard
+        pygame.draw.rect(screen, (15,15,20), (10,10,330,165))
+        label("F1 NEAT - 200 LAP RACE", 20, 16, YELLOW)
+        for pos, i in enumerate(ranked):
+            car = cars[i]
+            y = 48 + pos * 39
+            label(f"P{pos+1} Car {i+1}", 20, y, COLORS[i])
+            label(f"{car.completed_laps}/{TARGET_LAPS} laps", 145, y)
+            label(lap_time(car.best_lap_frames), 145, y+17, WHITE, small)
 
-            screen.blit(
-                small_font.render(
-                    "SPACE: Pause | R: Restart | S: Sensors | ESC: Quit",
-                    True,
-                    (230, 230, 240),
-                ),
-                (15, HEIGHT - 28),
-            )
+        # Gaps panel, refreshed once per second
+        pygame.draw.rect(screen, (15,15,20), (WIDTH-220,10,210,115))
+        label("GAPS TO LEADER", WIDTH-210, 17, YELLOW)
+        for pos, i in enumerate(ranked):
+            gap_text = "LEADER" if pos == 0 else f"+{gaps[i]:.1f} m"
+            label(f"Car {i+1}: {gap_text}", WIDTH-210, 45+pos*23, COLORS[i], small)
 
-            if paused:
-                label = font.render(
-                    "PAUSED",
-                    True,
-                    (255, 220, 80),
-                )
-                screen.blit(
-                    label,
-                    label.get_rect(
-                        center=(WIDTH // 2, 35)
-                    ),
-                )
+        label(f"Overall best: {lap_time(overall_best)}", 12, HEIGHT-43, GREEN)
+        label("S: Sensors  |  ESC: Exit", 12, HEIGHT-23, WHITE, small)
 
-            pygame.display.flip()
-            clock.tick(FPS)
+        if finished:
+            label("RACE FINISHED - ESC TO EXIT",
+                  WIDTH//2-155, HEIGHT//2, YELLOW)
 
-    finally:
-        pygame.quit()
+        pygame.display.flip()
+
+    pygame.quit()
 
 
 if __name__ == "__main__":
-    main()
+    race()

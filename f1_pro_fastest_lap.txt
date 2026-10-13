@@ -1,4 +1,4 @@
 F1 Pro fastest lap
-Lap time: 4.9667 seconds
-Frames: 298
-Generation: 29
+Lap time: 5.0333 seconds
+Frames: 302
+Generation: 13

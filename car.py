@@ -1,493 +1,167 @@
 
 import math
-import random
 import pygame
 
-# --------------------------------------------------
-# DISPLAY AND TRACK SETTINGS
-# --------------------------------------------------
+WIDTH, HEIGHT = 1000, 800
+BG = GRASS = (30, 130, 50)
+TRACK_COLOR = (65, 65, 65)
+ROAD_LINE = (240, 240, 240)
+CENTER_LINE = (255, 220, 80)
+TURQUOISE = (0, 255, 210)
+TRACK_WIDTH, ROAD_MARGIN, SENSOR_RANGE = 100, 8, 150
 
-WIDTH, HEIGHT = 1200, 800
-CENTER = (WIDTH // 2, HEIGHT // 2)
-
-TRACK_RX = 390
-TRACK_RY = 270
-
-TRACK_WIDTH = 110
-
-INNER_RX = TRACK_RX - TRACK_WIDTH
-INNER_RY = TRACK_RY - TRACK_WIDTH
-
-BG = (12, 16, 25)
-TRACK_COLOR = (48, 54, 65)
-ROAD_LINE = (220, 225, 235)
-TURQUOISE = (40, 230, 210)
-
-WHITE = (245, 245, 245)
-BLACK = (15, 15, 18)
-RED = (235, 45, 55)
-DARK_RED = (150, 20, 30)
-GOLD = (255, 195, 55)
-WINDOW_BLUE = (65, 150, 195)
-
-# --------------------------------------------------
-# CAR SETTINGS
-# --------------------------------------------------
-
-CAR_LENGTH = 30
-CAR_WIDTH = 15
-
-SENSOR_ANGLES = (-70, -35, 0, 35, 70)
-SENSOR_RANGE = 180
-
-MAX_SPEED = 5.0
-ACCELERATION = 0.12
-BRAKING = 0.08
-FRICTION = 0.025
-STEERING_RATE = 0.055
-
-ROAD_MARGIN = 7
+TRACK_POINTS = [
+    (180,650), (180,450), (220,300), (350,220),
+    (520,200), (700,230), (820,330), (830,430),
+    (780,490), (680,480), (620,410), (580,330),
+    (500,300), (400,330), (350,430), (350,570),
+    (300,650)
+]
 
 
+def build_track():
+    points, n = [], len(TRACK_POINTS)
+    for i in range(n):
+        p0, p1 = TRACK_POINTS[(i-1)%n], TRACK_POINTS[i]
+        p2, p3 = TRACK_POINTS[(i+1)%n], TRACK_POINTS[(i+2)%n]
+        for j in range(12):
+            t = j/12
+            t2, t3 = t*t, t*t*t
+            x = .5*(2*p1[0]+(-p0[0]+p2[0])*t+
+                    (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2+
+                    (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)
+            y = .5*(2*p1[1]+(-p0[1]+p2[1])*t+
+                    (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2+
+                    (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+            points.append((x,y))
+    return points
 
+
+TRACK_CENTERLINE = build_track()
+
+
+def closest_track_index(x, y):
+    return min(range(len(TRACK_CENTERLINE)),
+               key=lambda i: (TRACK_CENTERLINE[i][0]-x)**2 +
+                             (TRACK_CENTERLINE[i][1]-y)**2)
+
+
+def closest_track_point(x, y):
+    return TRACK_CENTERLINE[closest_track_index(x,y)]
+
+
+def point_on_road(x, y):
+    p = closest_track_point(x,y)
+    return math.hypot(x-p[0], y-p[1]) < TRACK_WIDTH/2-ROAD_MARGIN
 
 
 class Car:
-    def __init__(self, theta=None):
-        """
-        Create a car at a random position around the circuit,
-        or at a supplied theta angle in radians.
-        """
-
-        self.theta = (
-            random.uniform(0, 2 * math.pi)
-            if theta is None
-            else theta
-        )
-
-        # Place the car approximately in the middle of the road.
-        road_rx = (TRACK_RX + INNER_RX) / 2
-        road_ry = (TRACK_RY + INNER_RY) / 2
-
-        self.x = CENTER[0] + road_rx * math.cos(self.theta)
-        self.y = CENTER[1] + road_ry * math.sin(self.theta)
-
-        # Align the car with the direction of travel around the oval.
+    def __init__(self, theta=0):
+        n = len(TRACK_CENTERLINE)
+        i = int(theta*n/(2*math.pi)) % n
+        self.x, self.y = TRACK_CENTERLINE[i]
         self.angle = self.track_tangent()
-
-        self.speed = 0.0
-        self.max_speed = MAX_SPEED
-        self.alive = True
-
-        self.fitness = 0.0
-        self.distance_reward = 0.0
-
-        self.completed_laps = 0
-        self.best_lap_frames = None
-        self.lap_frames = 0
-
-        self.previous_progress = self.track_progress()
-        self.progress_since_lap = 0.0
-
-        self.stuck_frames = 0
-        self.previous_x = self.x
-        self.previous_y = self.y
-
-        self.color = (
-            random.randint(100, 255),
-            random.randint(60, 220),
-            random.randint(60, 220),
-        )
-
-    # --------------------------------------------------
-    # TRACK GEOMETRY
-    # --------------------------------------------------
-
-    def track_progress(self):
-        """
-        Return the car's angular position around the ellipse.
-        """
-
-        dx = (self.x - CENTER[0]) / TRACK_RX
-        dy = (self.y - CENTER[1]) / TRACK_RY
-
-        return math.atan2(dy, dx) % (2 * math.pi)
+        self.speed, self.max_speed = 4.0, 12.0
+        self.alive, self.fitness = True, 0.0
+        self.sensor_readings, self.sensor_endpoints = [], []
+        self.completed_laps, self.best_lap_frames = 0, None
+        self.frames = self.lap_frames = self.stuck_frames = 0
+        self.last_progress = i
 
     def track_tangent(self):
-        """
-        Calculate the direction tangent to the oval at the car's
-        current position.
-        """
-
-        theta = math.atan2(
-            (self.y - CENTER[1]) / TRACK_RY,
-            (self.x - CENTER[0]) / TRACK_RX,
-            )
-
-        dx = -TRACK_RX * math.sin(theta)
-        dy = TRACK_RY * math.cos(theta)
-
-        return math.atan2(dy, dx)
-
-    def point_on_road(self, x, y):
-        """
-        Check whether a point lies between the track boundaries.
-        """
-
-        outer_rx = TRACK_RX - ROAD_MARGIN
-        outer_ry = TRACK_RY - ROAD_MARGIN
-
-        inner_rx = INNER_RX + ROAD_MARGIN
-        inner_ry = INNER_RY + ROAD_MARGIN
-
-        ox = (x - CENTER[0]) / outer_rx
-        oy = (y - CENTER[1]) / outer_ry
-
-        ix = (x - CENTER[0]) / inner_rx
-        iy = (y - CENTER[1]) / inner_ry
-
-        inside_outer = ox * ox + oy * oy <= 1.0
-        outside_inner = ix * ix + iy * iy >= 1.0
-
-        return inside_outer and outside_inner
-
-    def on_road(self):
-        """
-        Check the center and corners of the car against the track.
-        """
-
-        forward_x = math.cos(self.angle)
-        forward_y = math.sin(self.angle)
-
-        side_x = -math.sin(self.angle)
-        side_y = math.cos(self.angle)
-
-        front = CAR_LENGTH * 0.42
-        rear = CAR_LENGTH * 0.42
-        side = CAR_WIDTH * 0.42
-
-        points = [
-            (self.x, self.y),
-            (
-                self.x + forward_x * front + side_x * side,
-                self.y + forward_y * front + side_y * side,
-            ),
-            (
-                self.x + forward_x * front - side_x * side,
-                self.y + forward_y * front - side_y * side,
-            ),
-            (
-                self.x - forward_x * rear + side_x * side,
-                self.y - forward_y * rear + side_y * side,
-            ),
-            (
-                self.x - forward_x * rear - side_x * side,
-                self.y - forward_y * rear - side_y * side,
-            ),
-        ]
-
-        return all(self.point_on_road(px, py) for px, py in points)
-
-    # --------------------------------------------------
-    # SENSORS
-    # --------------------------------------------------
-
-    def cast_sensor(self, angle):
-        """
-        Cast a ray from the car until it reaches the track edge.
-        Return a normalized distance from 0 to 1.
-        """
-
-        for distance in range(0, SENSOR_RANGE + 1, 4):
-            px = self.x + math.cos(angle) * distance
-            py = self.y + math.sin(angle) * distance
-
-            if not self.point_on_road(px, py):
-                return distance / SENSOR_RANGE
-
-        return 1.0
+        i = closest_track_index(self.x, self.y)
+        a = TRACK_CENTERLINE[i]
+        b = TRACK_CENTERLINE[(i+1)%len(TRACK_CENTERLINE)]
+        return math.atan2(b[1]-a[1], b[0]-a[0])
 
     def sensors(self):
-        """
-        Five forward-facing sensors, normalized from 0 to 1.
-        """
-
-        readings = []
-
-        for degrees in SENSOR_ANGLES:
-            sensor_angle = self.angle + math.radians(degrees)
-            readings.append(self.cast_sensor(sensor_angle))
-
+        readings, endpoints = [], []
+        for offset in (-math.pi/2, -math.pi/4, 0, math.pi/4, math.pi/2):
+            a = self.angle+offset
+            end = (self.x+math.cos(a)*SENSOR_RANGE,
+                   self.y+math.sin(a)*SENSOR_RANGE)
+            hit = SENSOR_RANGE
+            for d in range(5, SENSOR_RANGE+1, 5):
+                px, py = self.x+math.cos(a)*d, self.y+math.sin(a)*d
+                if not point_on_road(px,py):
+                    hit, end = d, (px,py)
+                    break
+            readings.append(hit/SENSOR_RANGE)
+            endpoints.append(end)
+        self.sensor_readings, self.sensor_endpoints = readings, endpoints
         return readings
 
-    def sensor_endpoints(self):
-        endpoints = []
-
-        for degrees in SENSOR_ANGLES:
-            sensor_angle = self.angle + math.radians(degrees)
-
-            distance = self.cast_sensor(sensor_angle) * SENSOR_RANGE
-
-            end_x = self.x + math.cos(sensor_angle) * distance
-            end_y = self.y + math.sin(sensor_angle) * distance
-
-            endpoints.append((end_x, end_y))
-
-        return endpoints
-
-    # --------------------------------------------------
-    # LAP PROGRESS AND FITNESS
-    # --------------------------------------------------
-
-    def update_lap_progress(self):
-        """
-        Track progress around the circuit and detect completed laps.
-        """
-
-        current_progress = self.track_progress()
-
-        delta = current_progress - self.previous_progress
-
-        # Handle crossing the 0 / 2*pi boundary.
-        if delta < -math.pi:
-            delta += 2 * math.pi
-        elif delta > math.pi:
-            delta -= 2 * math.pi
-
-        # Only reward forward progress.
-        if delta > 0:
-            self.progress_since_lap += delta
-            self.fitness += delta * 10.0
-
-        self.previous_progress = current_progress
-
-        # A complete revolution is approximately 2*pi radians.
-        if self.progress_since_lap >= 2 * math.pi:
-            self.progress_since_lap -= 2 * math.pi
-            self.completed_laps += 1
-
-            if (
-                    self.best_lap_frames is None
-                    or self.lap_frames < self.best_lap_frames
-            ):
-                self.best_lap_frames = self.lap_frames
-
-            self.lap_frames = 0
-
-            # Reward completing a full lap.
-            self.fitness += 500.0
-
-    # --------------------------------------------------
-    # UPDATE
-    # --------------------------------------------------
+    def get_sensors(self):
+        return self.sensors()
 
     def update(self, outputs):
-        """
-        Update steering and throttle from the NEAT network.
-
-        Expected outputs:
-            outputs[0] = steering
-            outputs[1] = throttle
-        """
-
         if not self.alive:
             return
 
-        steering = max(-1.0, min(1.0, outputs[0]))
-        throttle = max(-1.0, min(1.0, outputs[1]))
-
-        # Steer more effectively as the car gains speed.
-        steering_strength = 0.45 + 0.55 * (
-            min(abs(self.speed) / self.max_speed, 1.0)
-        )
-
-        self.angle += (
-                steering
-                * STEERING_RATE
-                * steering_strength
-        )
-
-        # Throttle and braking.
-        if throttle >= 0:
-            self.speed += throttle * ACCELERATION
-        else:
-            self.speed += throttle * BRAKING
-
-        # Natural drag.
-        if self.speed > 0:
-            self.speed = max(0.0, self.speed - FRICTION)
-        elif self.speed < 0:
-            self.speed = min(0.0, self.speed + FRICTION)
-
-        self.speed = max(0.0, min(self.max_speed, self.speed))
-
-        # Move in the direction the car is facing.
-        self.x += math.cos(self.angle) * self.speed
-        self.y += math.sin(self.angle) * self.speed
-
+        steering = max(-1, min(1, outputs[0]))
+        throttle = max(0, min(1, outputs[1]))
+        self.angle += steering*0.055*max(0.5, self.speed/3)
+        self.speed = min(self.max_speed, max(0, self.speed+throttle*0.12-0.025))
+        self.x += math.cos(self.angle)*self.speed
+        self.y += math.sin(self.angle)*self.speed
+        self.frames += 1
         self.lap_frames += 1
 
-        # Detect whether the car has left the road.
-        if not self.on_road():
+        previous = self.last_progress
+        i = closest_track_index(self.x, self.y)
+        n = len(TRACK_CENTERLINE)
+        delta = (i-previous+n//2) % n-n//2
+
+        # Reward forward progress and speed.
+        self.fitness += delta*0.5 + self.speed*0.01
+
+        # Reward completing a lap in the forward direction.
+        if previous > n*0.90 and i < n*0.10 and delta > 0:
+            self.completed_laps += 1
+            self.fitness += 100
+            if self.best_lap_frames is None or self.lap_frames < self.best_lap_frames:
+                self.best_lap_frames = self.lap_frames
+            self.lap_frames = 0
+
+        self.last_progress = i
+        self.stuck_frames = self.stuck_frames+1 if self.speed < 0.3 else 0
+
+        if self.stuck_frames > 240 or not point_on_road(self.x,self.y):
             self.alive = False
-            self.fitness -= 25.0
-            return
+            self.fitness -= 5
 
-        self.update_lap_progress()
-
-        # Penalize remaining stationary for too long.
-        movement = math.hypot(
-            self.x - self.previous_x,
-            self.y - self.previous_y,
-            )
-
-        if movement < 0.2:
-            self.stuck_frames += 1
-        else:
-            self.stuck_frames = 0
-
-        self.previous_x = self.x
-        self.previous_y = self.y
-
-        if self.stuck_frames > 180:
-            self.alive = False
-            self.fitness -= 10.0
-            return
-
-        # Small reward for staying alive and moving.
-        self.fitness += 0.01
-
-    # --------------------------------------------------
-    # DRAWING
-    # --------------------------------------------------
 
     def draw(self, screen, show_sensors=False):
-        """
-        Draw the car, tires, windows, and optional sensor rays.
-        """
-
         if show_sensors:
-            for endpoint in self.sensor_endpoints():
-                pygame.draw.line(
-                    screen,
-                    (70, 220, 130),
-                    (int(self.x), int(self.y)),
-                    (int(endpoint[0]), int(endpoint[1])),
-                    1,
-                )
+            self.sensors()
+            for e in self.sensor_endpoints:
+                pygame.draw.line(screen, (255,220,0),
+                                 (int(self.x),int(self.y)), (int(e[0]),int(e[1])), 1)
 
-        # Local car coordinates: forward is positive X.
-        cos_a = math.cos(self.angle)
-        sin_a = math.sin(self.angle)
+        s = pygame.Surface((64,30), pygame.SRCALPHA)
+        dark, tyre = (25,29,35), (12,13,16)
 
-        def world_point(local_x, local_y):
-            return (
-                int(self.x + local_x * cos_a - local_y * sin_a),
-                int(self.y + local_x * sin_a + local_y * cos_a),
-            )
+        # Slick tyres
+        for x,y in [(13,1),(13,22),(44,1),(44,22)]:
+            pygame.draw.rect(s,tyre,(x,y,10,7),border_radius=2)
 
-        # Tire positions in the car's local coordinate system.
-        tire_width = 9
-        tire_height = 4
+        # Front and rear wings
+        pygame.draw.polygon(s,dark,[(48,2),(63,4),(63,7),(48,9),(45,7)])
+        pygame.draw.polygon(s,dark,[(48,28),(63,26),(63,23),(48,21),(45,23)])
+        pygame.draw.rect(s,dark,(3,1,12,28),border_radius=2)
 
-        tire_positions = [
-            (7, -CAR_WIDTH / 2 - 1),
-            (7, CAR_WIDTH / 2 + 1),
-            (-7, -CAR_WIDTH / 2 - 1),
-            (-7, CAR_WIDTH / 2 + 1),
-        ]
+        # Chassis and sidepods
+        pygame.draw.polygon(s,TURQUOISE,
+                            [(8,11),(20,8),(35,10),(54,13),(54,17),(35,20),(20,22),(8,19)])
+        pygame.draw.polygon(s,(0,175,155),
+                            [(21,8),(36,10),(42,13),(31,14),(22,12)])
+        pygame.draw.polygon(s,(0,175,155),
+                            [(21,22),(36,20),(42,17),(31,16),(22,18)])
 
-        # IMPORTANT: rotate tire surfaces, never Rect objects.
-        for local_x, local_y in tire_positions:
-            tire_surface = pygame.Surface(
-                (tire_width, tire_height),
-                pygame.SRCALPHA,
-            )
+        # Cockpit and halo
+        pygame.draw.ellipse(s,dark,(29,11,13,8))
+        pygame.draw.ellipse(s,(70,80,90),(32,12,7,6))
+        pygame.draw.arc(s,(235,242,245),(28,10,15,10),0,math.tau,2)
 
-            pygame.draw.rect(
-                tire_surface,
-                BLACK,
-                (0, 0, tire_width, tire_height),
-                border_radius=1,
-            )
-
-            rotated_tire = pygame.transform.rotate(
-                tire_surface,
-                -math.degrees(self.angle),
-            )
-
-            tire_rect = rotated_tire.get_rect(
-                center=world_point(local_x, local_y)
-            )
-
-            screen.blit(rotated_tire, tire_rect)
-
-        # Main body.
-        body_local = [
-            (CAR_LENGTH / 2, 0),
-            (CAR_LENGTH / 2 - 5, -CAR_WIDTH / 2),
-            (-CAR_LENGTH / 2 + 3, -CAR_WIDTH / 2),
-            (-CAR_LENGTH / 2, -CAR_WIDTH / 2 + 3),
-            (-CAR_LENGTH / 2, CAR_WIDTH / 2 - 3),
-            (-CAR_LENGTH / 2 + 3, CAR_WIDTH / 2),
-            (CAR_LENGTH / 2 - 5, CAR_WIDTH / 2),
-        ]
-
-        body_points = [
-            world_point(px, py) for px, py in body_local
-        ]
-
-        pygame.draw.polygon(screen, DARK_RED, body_points)
-
-        inset_local = [
-            (CAR_LENGTH / 2 - 2, 0),
-            (CAR_LENGTH / 2 - 6, -CAR_WIDTH / 2 + 2),
-            (-CAR_LENGTH / 2 + 4, -CAR_WIDTH / 2 + 2),
-            (-CAR_LENGTH / 2 + 1, 0),
-            (-CAR_LENGTH / 2 + 4, CAR_WIDTH / 2 - 2),
-            (CAR_LENGTH / 2 - 6, CAR_WIDTH / 2 - 2),
-        ]
-
-        inset_points = [
-            world_point(px, py) for px, py in inset_local
-        ]
-
-        pygame.draw.polygon(screen, self.color, inset_points)
-
-        # Cockpit / windshield.
-        cockpit_local = [
-            (6, -CAR_WIDTH * 0.29),
-            (1, -CAR_WIDTH * 0.29),
-            (-5, -CAR_WIDTH * 0.24),
-            (-7, 0),
-            (-5, CAR_WIDTH * 0.24),
-            (1, CAR_WIDTH * 0.29),
-            (6, CAR_WIDTH * 0.29),
-        ]
-
-        cockpit_points = [
-            world_point(px, py) for px, py in cockpit_local
-        ]
-
-        pygame.draw.polygon(
-            screen,
-            WINDOW_BLUE,
-            cockpit_points,
-        )
-
-        # Nose highlight.
-        pygame.draw.line(
-            screen,
-            GOLD,
-            world_point(CAR_LENGTH / 2 - 3, 0),
-            world_point(CAR_LENGTH / 2 - 8, 0),
-            2,
-        )
-
-        # Center marker.
-        pygame.draw.circle(
-            screen,
-            WHITE,
-            (int(self.x), int(self.y)),
-            2,
-        )
+        r = pygame.transform.rotate(s,-math.degrees(self.angle))
+        screen.blit(r,r.get_rect(center=(int(self.x),int(self.y))))
